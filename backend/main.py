@@ -211,6 +211,10 @@ async def create_user(user_data: UserCreate, current_user: Dict = Depends(get_cu
     if existing_user:
         raise HTTPException(status_code=400, detail="Username already exists")
     
+    # Hash the password for blockchain storage
+    import hashlib
+    password_hash = hashlib.sha256(user_data.password.encode()).hexdigest()
+    
     # Create user
     user_id = db.create_user(
         username=user_data.username,
@@ -221,7 +225,7 @@ async def create_user(user_data: UserCreate, current_user: Dict = Depends(get_cu
         email=user_data.email
     )
     
-    # Add to blockchain
+    # Add to blockchain - INCLUDE PASSWORD HASH for tamper detection
     blockchain.add_block({
         "action": "create_user",
         "user_role": current_user['role'],
@@ -230,7 +234,10 @@ async def create_user(user_data: UserCreate, current_user: Dict = Depends(get_cu
             "new_user_id": user_id,
             "username": user_data.username,
             "role": user_data.role,
-            "full_name": user_data.full_name
+            "full_name": user_data.full_name,
+            "email": user_data.email,
+            "badge_number": user_data.badge_number,
+            "password_hash": password_hash  # Store hash in blockchain for validation
         }
     })
     save_blockchain_to_db()
@@ -402,7 +409,7 @@ async def create_evidence(
         file_type=file_type
     )
     
-    # Calculate hash of evidence data for tamper detection
+    # Calculate hash of evidence data for tamper detection (including status)
     evidence_data_string = json.dumps({
         "evidence_id": evidence_id,
         "description": description,
@@ -412,7 +419,8 @@ async def create_evidence(
         "investigating_officer_id": investigating_officer_id,
         "forensic_officer_id": forensic_officer_id,
         "file_path": file_path,
-        "file_name": file_name
+        "file_name": file_name,
+        "status": "active"
     }, sort_keys=True)
     evidence_hash = hashlib.sha256(evidence_data_string.encode()).hexdigest()
     
@@ -549,19 +557,21 @@ async def create_evidence_log(log_data: EvidenceLogCreate, current_user: Dict = 
         destination=log_data.destination
     )
     
-    # Add to blockchain
+    # Add to blockchain - Store ALL fields for tamper detection
     blockchain.add_block({
-        "action": f"evidence_{log_data.log_type}",
+        "action": "create_evidence_log",
         "user_role": current_user['role'],
         "user_id": current_user['user_id'],
         "details": {
-            "evidence_id": log_data.evidence_id,
+            "log_id": log_id,
+            "evidence_id": evidence['id'],  # Store the internal ID
             "log_type": log_data.log_type,
             "item_count": log_data.item_count,
             "size": log_data.size,
             "description": log_data.description,
             "source": log_data.source,
-            "destination": log_data.destination
+            "destination": log_data.destination,
+            "officer_id": current_user['user_id']
         }
     })
     save_blockchain_to_db()
@@ -630,7 +640,9 @@ async def validate_blockchain(current_user: Dict = Depends(get_current_user)):
         "chain_message": chain_validation["message"],
         "data_message": data_validation["message"],
         "broken_at": chain_validation.get("broken_at"),
-        "tampered_evidence": data_validation.get("tampered_evidence", [])
+        "tampered_evidence": data_validation.get("tampered_evidence", []),
+        "tampered_users": data_validation.get("tampered_users", []),
+        "tampered_logs": data_validation.get("tampered_logs", [])
     }
     
     # Log validation attempt
@@ -646,8 +658,9 @@ async def validate_blockchain(current_user: Dict = Depends(get_current_user)):
 
 def validate_all_data_integrity() -> Dict[str, Any]:
     """
-    Validate ALL database tables against blockchain records
-    Checks: evidence, users, and other tables
+    Validate CRITICAL database tables against blockchain records
+    Checks: evidence, users, evidence_logs
+    NOTE: Activity logs excluded - they're metadata and cause timing false positives
     """
     all_tampered_items = []
     messages = []
@@ -664,20 +677,31 @@ def validate_all_data_integrity() -> Dict[str, Any]:
         all_tampered_items.extend(user_validation.get("tampered_users", []))
         messages.append(user_validation["message"])
     
+    # Validate evidence logs - CRITICAL: These track chain of custody
+    evidence_logs_validation = validate_evidence_logs_integrity()
+    if not evidence_logs_validation["valid"]:
+        all_tampered_items.extend(evidence_logs_validation.get("tampered_logs", []))
+        messages.append(evidence_logs_validation["message"])
+    
+    # Activity logs validation REMOVED - causes false positives due to timing
+    # Activity logs are metadata only and less critical than core data
+    
     # Overall result
     if all_tampered_items:
         return {
             "valid": False,
             "message": f"⚠️ TAMPERING DETECTED! {len(all_tampered_items)} record(s) modified. " + " ".join(messages),
             "tampered_evidence": [item for item in all_tampered_items if item.get("type") == "evidence"],
-            "tampered_users": [item for item in all_tampered_items if item.get("type") == "user"]
+            "tampered_users": [item for item in all_tampered_items if item.get("type") == "user"],
+            "tampered_logs": [item for item in all_tampered_items if item.get("type") == "evidence_log"]
         }
     else:
         return {
             "valid": True,
-            "message": "✓ All database records match blockchain. No tampering detected.",
+            "message": "✓ All critical database records match blockchain. No tampering detected.",
             "tampered_evidence": [],
-            "tampered_users": []
+            "tampered_users": [],
+            "tampered_logs": []
         }
 
 
@@ -688,6 +712,17 @@ def validate_user_data_integrity() -> Dict[str, Any]:
     try:
         # Get all users from database
         all_users = db.get_all_users()
+        
+        # Count user-related blocks in blockchain
+        user_blocks_count = len([b for b in blockchain.chain if b.data.get("action") in ["create_user", "update_user", "delete_user"]])
+        
+        # If no user blocks in blockchain, skip validation (users created before blockchain)
+        if user_blocks_count == 0:
+            return {
+                "valid": True,
+                "message": "✓ No user operations in blockchain to validate (users created before blockchain).",
+                "tampered_users": []
+            }
         
         # Build expected user state from blockchain
         user_blockchain_state = {}
@@ -705,6 +740,9 @@ def validate_user_data_integrity() -> Dict[str, Any]:
                         "username": details.get("username"),
                         "role": details.get("role"),
                         "full_name": details.get("full_name"),
+                        "email": details.get("email"),
+                        "badge_number": details.get("badge_number"),
+                        "password_hash": details.get("password_hash"),  # Store password hash
                         "exists": True
                     }
             
@@ -723,18 +761,43 @@ def validate_user_data_integrity() -> Dict[str, Any]:
                 if user_id and user_id in user_blockchain_state:
                     user_blockchain_state[user_id]["exists"] = False
         
+        # Also build a username-based lookup (in case ID was tampered)
+        user_blockchain_by_username = {}
+        for uid, udata in user_blockchain_state.items():
+            username = udata.get("username")
+            if username:
+                user_blockchain_by_username[username] = udata
+        
         # Check each user against blockchain
         tampered_users = []
         for user in all_users:
             user_id = user.get("id")
+            username = user.get("username")
             
-            # Skip users not in blockchain (like default admin created before blockchain)
-            if user_id not in user_blockchain_state:
+            # Try to find user in blockchain by ID first, then by username
+            blockchain_user = None
+            if user_id in user_blockchain_state:
+                blockchain_user = user_blockchain_state[user_id]
+            elif username in user_blockchain_by_username:
+                blockchain_user = user_blockchain_by_username[username]
+                # ID was tampered!
+                tampered_users.append({
+                    "type": "user",
+                    "user_id": user_id,
+                    "username": username,
+                    "tampered_fields": ["user_id"],
+                    "current_user_id": user_id,
+                    "expected_user_id": blockchain_user.get("user_id"),
+                    "details": "User ID has been manually changed in database!"
+                })
+            else:
+                # User not in blockchain, skip validation
                 continue
             
-            blockchain_user = user_blockchain_state[user_id]
+            if not blockchain_user:
+                continue
             
-            # Check for mismatches
+            # Check for other mismatches - CHECK ALL FIELDS FOR COMPLETE TAMPER DETECTION
             mismatches = []
             
             if user.get("username") != blockchain_user.get("username"):
@@ -746,9 +809,24 @@ def validate_user_data_integrity() -> Dict[str, Any]:
             if user.get("full_name") != blockchain_user.get("full_name"):
                 mismatches.append("full_name")
             
-            # Check if deleted user still exists
-            if not blockchain_user.get("exists") and user.get("is_active") == 1:
-                mismatches.append("should_be_deleted")
+            # Check email (handle None values)
+            if str(user.get("email") or "") != str(blockchain_user.get("email") or ""):
+                mismatches.append("email")
+            
+            # Check badge_number (handle None values)
+            if str(user.get("badge_number") or "") != str(blockchain_user.get("badge_number") or ""):
+                mismatches.append("badge_number")
+            
+            # Check is_active status - CRITICAL: This detects manual activation/deactivation
+            expected_is_active = 1 if blockchain_user.get("exists") else 0
+            if user.get("is_active") != expected_is_active:
+                mismatches.append("is_active")
+            
+            # Check password - CRITICAL: This detects password tampering
+            # The database column is called "password" and contains the hash
+            if blockchain_user.get("password_hash"):
+                if user.get("password") != blockchain_user.get("password_hash"):
+                    mismatches.append("password")
             
             if mismatches:
                 tampered_users.append({
@@ -761,19 +839,23 @@ def validate_user_data_integrity() -> Dict[str, Any]:
                     "current_role": user.get("role"),
                     "expected_role": blockchain_user.get("role"),
                     "current_full_name": user.get("full_name"),
-                    "expected_full_name": blockchain_user.get("full_name")
+                    "expected_full_name": blockchain_user.get("full_name"),
+                    "current_email": user.get("email"),
+                    "expected_email": blockchain_user.get("email"),
+                    "current_badge_number": user.get("badge_number"),
+                    "expected_badge_number": blockchain_user.get("badge_number")
                 })
         
         if tampered_users:
             return {
                 "valid": False,
-                "message": f"{len(tampered_users)} user record(s) tampered.",
+                "message": f"⚠️ USER DATA TAMPERING DETECTED! {len(tampered_users)} user record(s) have been manually modified in the database.",
                 "tampered_users": tampered_users
             }
         else:
             return {
                 "valid": True,
-                "message": "All user data matches blockchain.",
+                "message": "✓ All user data matches blockchain records.",
                 "tampered_users": []
             }
     
@@ -782,6 +864,224 @@ def validate_user_data_integrity() -> Dict[str, Any]:
             "valid": False,
             "message": f"Error validating users: {str(e)}",
             "tampered_users": []
+        }
+
+
+def validate_activity_logs_integrity() -> Dict[str, Any]:
+    """
+    Validate activity_logs table - SMART VALIDATION (avoids false positives)
+    Only checks deletion/tampering of CRITICAL audit records
+    Skips validation of non-critical logs like logins to avoid timing issues
+    """
+    try:
+        # Get all activity logs from database
+        all_logs = db.get_all_activity_logs(limit=10000)
+        
+        # Count CRITICAL blockchain actions only
+        critical_actions = ["create_user", "delete_user", "create_evidence", "delete_evidence", "update_evidence"]
+        blockchain_critical_count = 0
+        
+        for block in blockchain.chain:
+            if block.index == 0:  # Skip genesis block
+                continue
+            action = block.data.get("action")
+            if action in critical_actions:
+                blockchain_critical_count += 1
+        
+        # If no critical actions in blockchain, skip validation
+        if blockchain_critical_count == 0:
+            return {
+                "valid": True,
+                "message": "✓ No critical activity logs to validate.",
+                "tampered_activity_logs": []
+            }
+        
+        # Count critical activity logs in database
+        db_critical_count = 0
+        for log in all_logs:
+            if log.get("action") in critical_actions:
+                db_critical_count += 1
+        
+        # Check if critical logs were mass-deleted
+        # Allow some tolerance for timing (logs created after blockchain)
+        expected_min_logs = blockchain_critical_count
+        
+        if db_critical_count < expected_min_logs * 0.8:  # If <80% of expected logs exist
+            return {
+                "valid": False,
+                "message": f"⚠️ ACTIVITY LOGS DELETION DETECTED! Expected at least {expected_min_logs} critical logs but found only {db_critical_count}.",
+                "tampered_activity_logs": [{
+                    "type": "activity_log",
+                    "issue": "mass_deletion",
+                    "expected": expected_min_logs,
+                    "found": db_critical_count,
+                    "details": "Critical audit trail logs have been deleted from database"
+                }]
+            }
+        
+        # Check if someone changed action fields in critical logs
+        # Build map of action counts per user from blockchain
+        blockchain_action_counts = {}
+        for block in blockchain.chain:
+            if block.index == 0:
+                continue
+            action = block.data.get("action")
+            user_id = block.data.get("user_id")
+            if action in critical_actions and user_id:
+                key = f"{action}_{user_id}"
+                blockchain_action_counts[key] = blockchain_action_counts.get(key, 0) + 1
+        
+        # Build map from database logs
+        db_action_counts = {}
+        for log in all_logs:
+            action = log.get("action")
+            user_id = log.get("user_id")
+            if action in critical_actions and user_id:
+                key = f"{action}_{user_id}"
+                db_action_counts[key] = db_action_counts.get(key, 0) + 1
+        
+        # Check for suspicious discrepancies (MORE logs than blockchain = tampering)
+        tampered_logs = []
+        for db_key, db_count in db_action_counts.items():
+            blockchain_count = blockchain_action_counts.get(db_key, 0)
+            if db_count > blockchain_count:
+                parts = db_key.split('_', 1)
+                if len(parts) >= 2:
+                    action_name = parts[0]
+                    tampered_logs.append({
+                        "type": "activity_log",
+                        "issue": "tampered_action_field",
+                        "action": action_name,
+                        "details": f"Database has {db_count} '{action_name}' logs but blockchain has only {blockchain_count} - action field may have been manually changed"
+                    })
+        
+        if tampered_logs:
+            return {
+                "valid": False,
+                "message": f"⚠️ ACTIVITY LOG TAMPERING DETECTED! {len(tampered_logs)} action field(s) appear to be manually modified.",
+                "tampered_activity_logs": tampered_logs
+            }
+        
+        return {
+            "valid": True,
+            "message": "✓ All critical activity logs validated successfully.",
+            "tampered_activity_logs": []
+        }
+    
+    except Exception as e:
+        return {
+            "valid": False,
+            "message": f"Error during activity log validation: {str(e)}",
+            "tampered_activity_logs": []
+        }
+
+
+def validate_evidence_logs_integrity() -> Dict[str, Any]:
+    """
+    Validate evidence_logs table against blockchain records - CHECK ALL FIELDS
+    Evidence logs are CRITICAL for chain of custody - any tampering must be detected
+    """
+    try:
+        # Get all evidence logs from database
+        all_logs = db.get_all_evidence_logs()
+        
+        # Build blockchain state for evidence logs
+        evidence_log_blockchain_state = {}
+        
+        for block in blockchain.chain:
+            action = block.data.get("action")
+            details = block.data.get("details", {})
+            
+            # Track evidence log creations
+            if action == "create_evidence_log":
+                log_id = details.get("log_id")
+                if log_id:
+                    evidence_log_blockchain_state[log_id] = {
+                        "log_id": log_id,
+                        "evidence_id": details.get("evidence_id"),
+                        "log_type": details.get("log_type"),
+                        "item_count": details.get("item_count"),
+                        "size": details.get("size"),
+                        "description": details.get("description"),
+                        "source": details.get("source"),
+                        "destination": details.get("destination"),
+                        "officer_id": details.get("officer_id")
+                    }
+        
+        # If no evidence logs in blockchain, skip validation
+        if len(evidence_log_blockchain_state) == 0:
+            return {
+                "valid": True,
+                "message": "✓ No evidence logs in blockchain to validate.",
+                "tampered_logs": []
+            }
+        
+        # Validate each evidence log against blockchain
+        tampered_logs = []
+        
+        for log in all_logs:
+            log_id = log.get("id")
+            blockchain_log = evidence_log_blockchain_state.get(log_id)
+            
+            if not blockchain_log:
+                continue  # Log created before blockchain tracking
+            
+            # Check ALL fields for tampering
+            mismatches = []
+            
+            if log.get("evidence_id") != blockchain_log.get("evidence_id"):
+                mismatches.append("evidence_id")
+            
+            if log.get("log_type") != blockchain_log.get("log_type"):
+                mismatches.append("log_type")
+            
+            if log.get("item_count") != blockchain_log.get("item_count"):
+                mismatches.append("item_count")
+            
+            if str(log.get("size") or "") != str(blockchain_log.get("size") or ""):
+                mismatches.append("size")
+            
+            if log.get("description") != blockchain_log.get("description"):
+                mismatches.append("description")
+            
+            if str(log.get("source") or "") != str(blockchain_log.get("source") or ""):
+                mismatches.append("source")
+            
+            if str(log.get("destination") or "") != str(blockchain_log.get("destination") or ""):
+                mismatches.append("destination")
+            
+            if log.get("officer_id") != blockchain_log.get("officer_id"):
+                mismatches.append("officer_id")
+            
+            if mismatches:
+                tampered_logs.append({
+                    "type": "evidence_log",
+                    "log_id": log_id,
+                    "evidence_id": log.get("evidence_id"),
+                    "log_type": log.get("log_type"),
+                    "tampered_fields": mismatches,
+                    "current_values": {field: log.get(field) for field in mismatches},
+                    "expected_values": {field: blockchain_log.get(field) for field in mismatches}
+                })
+        
+        if tampered_logs:
+            return {
+                "valid": False,
+                "message": f"⚠️ EVIDENCE LOGS TAMPERED! {len(tampered_logs)} log(s) have been modified.",
+                "tampered_logs": tampered_logs
+            }
+        
+        return {
+            "valid": True,
+            "message": "✓ All evidence logs match blockchain records.",
+            "tampered_logs": []
+        }
+    
+    except Exception as e:
+        return {
+            "valid": False,
+            "message": f"Error validating evidence logs: {str(e)}",
+            "tampered_logs": []
         }
 
 
@@ -794,6 +1094,25 @@ def validate_evidence_data_integrity() -> Dict[str, Any]:
     try:
         # Get all evidence from database
         all_evidence = db.get_all_evidence()
+        
+        # Count evidence blocks in blockchain
+        evidence_blocks_count = len([b for b in blockchain.chain if b.data.get("action") in ["add_evidence", "update_evidence", "delete_evidence"]])
+        
+        # If blockchain has evidence blocks but database is empty, DB was wiped
+        if evidence_blocks_count > 0 and len(all_evidence) == 0:
+            return {
+                "valid": False,
+                "message": "⚠️ DATABASE WIPED! Blockchain has evidence records but database is empty.",
+                "tampered_evidence": []
+            }
+        
+        # If both are empty, it's valid
+        if evidence_blocks_count == 0 and len(all_evidence) == 0:
+            return {
+                "valid": True,
+                "message": "✓ No evidence to validate (empty system).",
+                "tampered_evidence": []
+            }
         
         # Build expected state from blockchain history (add + all updates)
         evidence_blockchain_state = {}
@@ -818,8 +1137,28 @@ def validate_evidence_data_integrity() -> Dict[str, Any]:
                     "forensic_officer_id": details.get("forensic_officer_id"),
                     "file_path": details.get("file_path"),
                     "file_name": details.get("file_name"),
+                    "status": "active",  # Start with active status
                     "evidence_hash": details.get("evidence_hash")
                 }
+            
+            # Mark as deleted in blockchain state
+            elif action == "delete_evidence":
+                if evidence_id in evidence_blockchain_state:
+                    evidence_blockchain_state[evidence_id]["status"] = "deleted"
+                    # Recalculate hash with deleted status
+                    deleted_data_string = json.dumps({
+                        "evidence_id": evidence_blockchain_state[evidence_id].get("evidence_id"),
+                        "description": evidence_blockchain_state[evidence_id].get("description"),
+                        "type": evidence_blockchain_state[evidence_id].get("type"),
+                        "date": evidence_blockchain_state[evidence_id].get("date"),
+                        "time": evidence_blockchain_state[evidence_id].get("time"),
+                        "investigating_officer_id": evidence_blockchain_state[evidence_id].get("investigating_officer_id"),
+                        "forensic_officer_id": evidence_blockchain_state[evidence_id].get("forensic_officer_id"),
+                        "file_path": evidence_blockchain_state[evidence_id].get("file_path"),
+                        "file_name": evidence_blockchain_state[evidence_id].get("file_name"),
+                        "status": "deleted"
+                    }, sort_keys=True)
+                    evidence_blockchain_state[evidence_id]["evidence_hash"] = hashlib.sha256(deleted_data_string.encode()).hexdigest()
             
             # Apply legitimate updates from blockchain
             elif action == "update_evidence":
@@ -827,8 +1166,8 @@ def validate_evidence_data_integrity() -> Dict[str, Any]:
                     changes = details.get("changes", {})
                     # Apply each change to the expected state
                     for key, value in changes.items():
-                        if key in evidence_blockchain_state[evidence_id]:
-                            evidence_blockchain_state[evidence_id][key] = value
+                        # Update the field in the blockchain state
+                        evidence_blockchain_state[evidence_id][key] = value
                     
                     # Recalculate expected hash after legitimate updates
                     updated_data_string = json.dumps({
@@ -840,7 +1179,8 @@ def validate_evidence_data_integrity() -> Dict[str, Any]:
                         "investigating_officer_id": evidence_blockchain_state[evidence_id].get("investigating_officer_id"),
                         "forensic_officer_id": evidence_blockchain_state[evidence_id].get("forensic_officer_id"),
                         "file_path": evidence_blockchain_state[evidence_id].get("file_path"),
-                        "file_name": evidence_blockchain_state[evidence_id].get("file_name")
+                        "file_name": evidence_blockchain_state[evidence_id].get("file_name"),
+                        "status": evidence_blockchain_state[evidence_id].get("status", "active")
                     }, sort_keys=True)
                     evidence_blockchain_state[evidence_id]["evidence_hash"] = hashlib.sha256(updated_data_string.encode()).hexdigest()
         
@@ -855,7 +1195,7 @@ def validate_evidence_data_integrity() -> Dict[str, Any]:
             
             blockchain_record = evidence_blockchain_state[evidence_id]
             
-            # Calculate current hash of evidence data
+            # Calculate current hash of evidence data (including status)
             current_data_string = json.dumps({
                 "evidence_id": evidence.get("evidence_id"),
                 "description": evidence.get("description"),
@@ -865,7 +1205,8 @@ def validate_evidence_data_integrity() -> Dict[str, Any]:
                 "investigating_officer_id": evidence.get("investigating_officer_id"),
                 "forensic_officer_id": evidence.get("forensic_officer_id"),
                 "file_path": evidence.get("file_path"),
-                "file_name": evidence.get("file_name")
+                "file_name": evidence.get("file_name"),
+                "status": evidence.get("status", "active")
             }, sort_keys=True)
             current_hash = hashlib.sha256(current_data_string.encode()).hexdigest()
             
@@ -900,6 +1241,9 @@ def validate_evidence_data_integrity() -> Dict[str, Any]:
                 
                 if evidence.get("file_name") != blockchain_record.get("file_name"):
                     mismatches.append("file_name")
+                
+                if evidence.get("status", "active") != blockchain_record.get("status", "active"):
+                    mismatches.append("status")
                 
                 tampered_evidence.append({
                     "evidence_id": evidence_id,

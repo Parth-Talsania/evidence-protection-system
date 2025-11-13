@@ -3,16 +3,21 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { FaEdit, FaTrash, FaTimes, FaHistory, FaFile, FaDownload, FaImage } from 'react-icons/fa'
 import { evidenceAPI, blockchainAPI } from '../../utils/api'
 import { useAuth } from '../../context/AuthContext'
+import Toast from '../../components/Toast'
+import { useToast } from '../../hooks/useToast'
 
 const EvidenceList = () => {
   const [evidence, setEvidence] = useState([])
   const [loading, setLoading] = useState(true)
   const [editingEvidence, setEditingEvidence] = useState(null)
   const [showEditModal, setShowEditModal] = useState(false)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [deletingEvidenceId, setDeletingEvidenceId] = useState(null)
   const [showHistoryModal, setShowHistoryModal] = useState(false)
   const [blockchainHistory, setBlockchainHistory] = useState([])
   const [searchTerm, setSearchTerm] = useState('')
   const { user } = useAuth()
+  const { toasts, showToast, removeToast } = useToast()
 
   const [formData, setFormData] = useState({
     description: '',
@@ -30,7 +35,9 @@ const EvidenceList = () => {
   const loadEvidence = async () => {
     try {
       const response = await evidenceAPI.getAll()
-      setEvidence(response.data)
+      // Filter out deleted evidence
+      const activeEvidence = response.data.filter(item => item.status !== 'deleted')
+      setEvidence(activeEvidence)
     } catch (error) {
       console.error('Failed to load evidence:', error)
     } finally {
@@ -57,22 +64,32 @@ const EvidenceList = () => {
       await evidenceAPI.update(editingEvidence.evidence_id, formData)
       loadEvidence()
       setShowEditModal(false)
-      alert('Evidence updated successfully')
+      showToast('Evidence updated successfully', 'success')
     } catch (error) {
-      alert(error.response?.data?.detail || 'Failed to update evidence')
+      showToast(error.response?.data?.detail || 'Failed to update evidence', 'error')
     }
   }
 
-  const handleDelete = async (evidenceId) => {
-    if (window.confirm('Are you sure you want to delete this evidence?')) {
-      try {
-        await evidenceAPI.delete(evidenceId)
-        loadEvidence()
-        alert('Evidence deleted successfully')
-      } catch (error) {
-        alert(error.response?.data?.detail || 'Failed to delete evidence')
-      }
+  const handleDelete = (evidenceId) => {
+    setDeletingEvidenceId(evidenceId)
+    setShowDeleteConfirm(true)
+  }
+
+  const confirmDelete = async () => {
+    try {
+      await evidenceAPI.delete(deletingEvidenceId)
+      loadEvidence()
+      setShowDeleteConfirm(false)
+      setDeletingEvidenceId(null)
+      showToast('Evidence deleted successfully', 'success')
+    } catch (error) {
+      showToast(error.response?.data?.detail || 'Failed to delete evidence', 'error')
     }
+  }
+
+  const cancelDelete = () => {
+    setShowDeleteConfirm(false)
+    setDeletingEvidenceId(null)
   }
 
   const handleViewHistory = async (evidenceId) => {
@@ -101,6 +118,18 @@ const EvidenceList = () => {
 
   return (
     <div>
+      {/* Toast Notifications */}
+      <AnimatePresence>
+        {toasts.map(toast => (
+          <Toast
+            key={toast.id}
+            message={toast.message}
+            type={toast.type}
+            onClose={() => removeToast(toast.id)}
+          />
+        ))}
+      </AnimatePresence>
+
       <h2 className="text-2xl font-bold text-gray-800 mb-6">Evidence Management</h2>
 
       {/* Search */}
@@ -191,6 +220,8 @@ const EvidenceList = () => {
               <button
                 onClick={() => handleDelete(item.evidence_id)}
                 className="flex-1 flex items-center justify-center space-x-2 bg-red-50 hover:bg-red-100 text-red-600 px-3 py-2 rounded-lg transition-colors"
+                data-testid={`delete-evidence-${item.evidence_id}`}
+                data-action="delete"
               >
                 <FaTrash />
                 <span>Delete</span>
@@ -205,6 +236,48 @@ const EvidenceList = () => {
           No evidence found
         </div>
       )}
+
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        {showDeleteConfirm && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+            data-testid="delete-confirm-modal"
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-xl font-bold text-gray-800 mb-4">Confirm Deletion</h3>
+              <p className="text-gray-600 mb-6">
+                Are you sure you want to delete this evidence? This action cannot be undone and will be recorded on the blockchain.
+              </p>
+              <div className="flex space-x-3">
+                <button
+                  onClick={confirmDelete}
+                  className="flex-1 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors"
+                  data-testid="confirm-delete-button"
+                >
+                  Delete
+                </button>
+                <button
+                  onClick={cancelDelete}
+                  className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg transition-colors"
+                  data-testid="cancel-delete-button"
+                >
+                  Cancel
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Edit Modal */}
       <AnimatePresence>
@@ -225,7 +298,12 @@ const EvidenceList = () => {
             >
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-xl font-bold text-gray-800">Edit Evidence</h3>
-                <button onClick={() => setShowEditModal(false)} className="text-gray-500 hover:text-gray-700">
+                <button 
+                  onClick={() => setShowEditModal(false)} 
+                  className="text-gray-500 hover:text-gray-700"
+                  data-testid="close-edit-modal"
+                  aria-label="Close modal"
+                >
                   <FaTimes />
                 </button>
               </div>
@@ -309,7 +387,12 @@ const EvidenceList = () => {
             >
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-xl font-bold text-gray-800">Blockchain History</h3>
-                <button onClick={() => setShowHistoryModal(false)} className="text-gray-500 hover:text-gray-700">
+                <button 
+                  onClick={() => setShowHistoryModal(false)} 
+                  className="text-gray-500 hover:text-gray-700"
+                  data-testid="close-history-modal"
+                  aria-label="Close modal"
+                >
                   <FaTimes />
                 </button>
               </div>

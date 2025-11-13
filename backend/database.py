@@ -283,6 +283,16 @@ class Database:
             """, (evidence_id,))
             return [dict(row) for row in cursor.fetchall()]
     
+    def get_all_evidence_logs(self) -> List[Dict[str, Any]]:
+        """Get ALL evidence logs for validation"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM evidence_logs
+                ORDER BY timestamp DESC
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+    
     # Activity log operations
     def create_activity_log(self, user_id: int, action: str, entity_type: str,
                            entity_id: int = None, details: Dict = None):

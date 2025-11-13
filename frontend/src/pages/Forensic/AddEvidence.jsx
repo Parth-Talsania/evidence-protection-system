@@ -1,9 +1,11 @@
 import React, { useState, useRef } from 'react'
-import { motion } from 'framer-motion'
+import { motion, AnimatePresence } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
 import { FaBoxOpen, FaCloudUploadAlt, FaFile, FaTimes } from 'react-icons/fa'
 import { evidenceAPI } from '../../utils/api'
 import { useAuth } from '../../context/AuthContext'
+import Toast from '../../components/Toast'
+import { useToast } from '../../hooks/useToast'
 
 const AddEvidence = () => {
   const navigate = useNavigate()
@@ -12,6 +14,7 @@ const AddEvidence = () => {
   const [selectedFile, setSelectedFile] = useState(null)
   const [dragActive, setDragActive] = useState(false)
   const fileInputRef = useRef(null)
+  const { toasts, showToast, removeToast } = useToast()
   
   const [formData, setFormData] = useState({
     evidence_id: '',
@@ -41,10 +44,14 @@ const AddEvidence = () => {
       }
       
       await evidenceAPI.create(formDataToSend)
-      alert('Evidence added successfully and recorded in blockchain')
-      navigate('/forensic')
+      showToast('Evidence added successfully and recorded in blockchain', 'success')
+      
+      // Wait 2 seconds to show the toast before navigating
+      setTimeout(() => {
+        navigate('/forensic')
+      }, 2000)
     } catch (error) {
-      alert(error.response?.data?.detail || 'Failed to add evidence')
+      showToast(error.response?.data?.detail || 'Failed to add evidence', 'error')
     } finally {
       setLoading(false)
     }
@@ -79,13 +86,13 @@ const AddEvidence = () => {
     const fileExtension = '.' + file.name.split('.').pop().toLowerCase()
     
     if (!allowedTypes.includes(file.type) && !allowedExtensions.includes(fileExtension)) {
-      alert('Invalid file type. Allowed: Images (JPG, PNG, GIF), PDF, DOC, DOCX, TXT')
+      showToast('Invalid file type. Allowed: Images (JPG, PNG, GIF), PDF, DOC, DOCX, TXT', 'error')
       return
     }
     
     // Validate file size (max 10MB)
     if (file.size > 10 * 1024 * 1024) {
-      alert('File size too large. Maximum size is 10MB')
+      showToast('File size too large. Maximum size is 10MB', 'error')
       return
     }
     
@@ -136,6 +143,18 @@ const AddEvidence = () => {
 
   return (
     <div>
+      {/* Toast Notifications */}
+      <AnimatePresence>
+        {toasts.map(toast => (
+          <Toast
+            key={toast.id}
+            message={toast.message}
+            type={toast.type}
+            onClose={() => removeToast(toast.id)}
+          />
+        ))}
+      </AnimatePresence>
+
       <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center">
         <FaBoxOpen className="mr-3 text-blue-600" />
         Add New Evidence

@@ -2,11 +2,15 @@ import React, { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { FaPlus, FaEdit, FaTrash, FaTimes } from 'react-icons/fa'
 import { userAPI } from '../../utils/api'
+import Toast from '../../components/Toast'
+import { useToast } from '../../hooks/useToast'
 
 const UserManagement = () => {
   const [users, setUsers] = useState([])
   const [loading, setLoading] = useState(true)
   const [showModal, setShowModal] = useState(false)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [deletingUserId, setDeletingUserId] = useState(null)
   const [editingUser, setEditingUser] = useState(null)
   const [formData, setFormData] = useState({
     username: '',
@@ -16,6 +20,7 @@ const UserManagement = () => {
     badge_number: '',
     role: 'forensic'
   })
+  const { toasts, showToast, removeToast } = useToast()
 
   useEffect(() => {
     loadUsers()
@@ -38,28 +43,53 @@ const UserManagement = () => {
     try {
       if (editingUser) {
         await userAPI.update(editingUser.id, formData)
+        showToast('User updated successfully', 'success')
       } else {
         await userAPI.create(formData)
+        showToast('User created successfully', 'success')
       }
       
       loadUsers()
       handleCloseModal()
-      alert(editingUser ? 'User updated successfully' : 'User created successfully')
     } catch (error) {
-      alert(error.response?.data?.detail || 'Operation failed')
+      showToast(error.response?.data?.detail || 'Operation failed', 'error')
     }
   }
 
-  const handleDelete = async (userId) => {
-    if (window.confirm('Are you sure you want to delete this user?')) {
-      try {
-        await userAPI.delete(userId)
+  const handleDelete = (userId) => {
+    setDeletingUserId(userId)
+    setShowDeleteConfirm(true)
+  }
+
+  const confirmDelete = async () => {
+    try {
+      const response = await userAPI.delete(deletingUserId)
+      
+      // Check if deletion actually succeeded
+      if (response.status === 200 || response.status === 204) {
         loadUsers()
-        alert('User deleted successfully')
-      } catch (error) {
-        alert(error.response?.data?.detail || 'Failed to delete user')
+        setShowDeleteConfirm(false)
+        setDeletingUserId(null)
+        showToast('User deleted successfully', 'success')
+      } else {
+        showToast('Failed to delete user', 'error')
+      }
+    } catch (error) {
+      setShowDeleteConfirm(false)
+      setDeletingUserId(null)
+      
+      if (error.response?.status === 404) {
+        showToast('User not found or already deleted', 'error')
+        loadUsers() // Refresh the list
+      } else {
+        showToast(error.response?.data?.detail || 'Failed to delete user', 'error')
       }
     }
+  }
+
+  const cancelDelete = () => {
+    setShowDeleteConfirm(false)
+    setDeletingUserId(null)
   }
 
   const handleEdit = (user) => {
@@ -108,6 +138,18 @@ const UserManagement = () => {
 
   return (
     <div>
+      {/* Toast Notifications */}
+      <AnimatePresence>
+        {toasts.map(toast => (
+          <Toast
+            key={toast.id}
+            message={toast.message}
+            type={toast.type}
+            onClose={() => removeToast(toast.id)}
+          />
+        ))}
+      </AnimatePresence>
+
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-2xl font-bold text-gray-800">User Management</h2>
         <motion.button
@@ -131,7 +173,7 @@ const UserManagement = () => {
                 <th className="table-header">Username</th>
                 <th className="table-header">Full Name</th>
                 <th className="table-header">Email</th>
-                <th className="table-header">Badge #</th>
+                <th className="table-header">Badge</th>
                 <th className="table-header">Role</th>
                 <th className="table-header">Status</th>
                 <th className="table-header">Actions</th>
@@ -163,22 +205,35 @@ const UserManagement = () => {
                     </span>
                   </td>
                   <td className="table-cell">
-                    <div className="flex space-x-2">
-                      <button
-                        onClick={() => handleEdit(user)}
-                        className="text-blue-600 hover:text-blue-800"
-                      >
-                        <FaEdit />
-                      </button>
-                      {user.role !== 'admin' && (
+                    {user.is_active ? (
+                      <div className="flex space-x-2">
                         <button
-                          onClick={() => handleDelete(user.id)}
-                          className="text-red-600 hover:text-red-800"
+                          onClick={() => handleEdit(user)}
+                          className="text-blue-600 hover:text-blue-800"
+                          title="Edit User"
+                          aria-label={`Edit user ${user.username}`}
+                          data-action="edit"
                         >
-                          <FaTrash />
+                          <FaEdit />
                         </button>
-                      )}
-                    </div>
+                        {user.role !== 'admin' && (
+                          <button
+                            onClick={() => handleDelete(user.id)}
+                            className="text-red-600 hover:text-red-800"
+                            title="Delete User"
+                            aria-label={`Delete user ${user.username}`}
+                            data-action="delete"
+                            data-testid={`delete-user-${user.id}`}
+                          >
+                            <FaTrash />
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="px-2 py-1 text-xs font-medium rounded-full bg-red-100 text-red-800">
+                        Deleted
+                      </span>
+                    )}
                   </td>
                 </motion.tr>
               ))}
@@ -186,6 +241,48 @@ const UserManagement = () => {
           </table>
         </div>
       </div>
+
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        {showDeleteConfirm && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+            data-testid="delete-confirm-modal"
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-xl font-bold text-gray-800 mb-4">Confirm Deletion</h3>
+              <p className="text-gray-600 mb-6">
+                Are you sure you want to delete this user? This action cannot be undone.
+              </p>
+              <div className="flex space-x-3">
+                <button
+                  onClick={confirmDelete}
+                  className="flex-1 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors"
+                  data-testid="confirm-delete-button"
+                >
+                  Delete
+                </button>
+                <button
+                  onClick={cancelDelete}
+                  className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg transition-colors"
+                  data-testid="cancel-delete-button"
+                >
+                  Cancel
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Modal */}
       <AnimatePresence>

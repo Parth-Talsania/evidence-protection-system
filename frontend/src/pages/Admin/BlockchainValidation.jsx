@@ -202,12 +202,69 @@ const BlockchainValidation = () => {
                               </p>
                             </div>
                           )}
+                          
+                          {item.tampered_fields.includes('email') && (
+                            <div className="bg-gray-50 p-2 rounded">
+                              <p className="text-gray-600">
+                                <span className="font-semibold">Expected Email (Blockchain):</span> {item.expected_email || 'None'}
+                              </p>
+                              <p className="text-red-600">
+                                <span className="font-semibold">Current Email (Database):</span> {item.current_email || 'None'}
+                              </p>
+                            </div>
+                          )}
+                          
+                          {item.tampered_fields.includes('badge_number') && (
+                            <div className="bg-gray-50 p-2 rounded">
+                              <p className="text-gray-600">
+                                <span className="font-semibold">Expected Badge (Blockchain):</span> {item.expected_badge_number || 'None'}
+                              </p>
+                              <p className="text-red-600">
+                                <span className="font-semibold">Current Badge (Database):</span> {item.current_badge_number || 'None'}
+                              </p>
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
+
+              {/* Tampered Evidence Logs Details */}
+              {validation.tampered_logs && validation.tampered_logs.length > 0 && (
+                <div className="mt-4 p-4 bg-purple-50 border border-purple-200 rounded-lg">
+                  <h4 className="font-bold text-purple-800 mb-3">⚠️ Tampered Evidence Logs Detected:</h4>
+                  <div className="space-y-3">
+                    {validation.tampered_logs.map((item, index) => (
+                      <div key={index} className="bg-white p-3 rounded border border-purple-300">
+                        <p className="font-semibold text-gray-800 mb-1">
+                          Log ID: <span className="text-purple-600">{item.log_id}</span> - Evidence ID: {item.evidence_id}
+                        </p>
+                        <p className="text-sm text-gray-700 mb-2">
+                          Modified Fields: <span className="font-medium text-purple-600">{item.tampered_fields.join(', ')}</span>
+                        </p>
+                        <div className="text-xs space-y-1">
+                          {item.current_values && (
+                            <div className="bg-gray-50 p-2 rounded">
+                              <p className="text-gray-700 font-semibold mb-1">Current vs Expected:</p>
+                              {Object.keys(item.current_values).map((field) => (
+                                <div key={field} className="mb-1">
+                                  <span className="text-red-600">{field}: {JSON.stringify(item.current_values[field])}</span>
+                                  <span className="text-gray-500"> → </span>
+                                  <span className="text-green-600">{JSON.stringify(item.expected_values[field])}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+
             </div>
           </div>
         </motion.div>

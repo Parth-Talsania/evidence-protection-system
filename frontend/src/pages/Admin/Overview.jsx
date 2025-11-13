@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { FaUsers, FaBoxOpen, FaCube, FaCheckCircle } from 'react-icons/fa'
+import { FaUsers, FaBoxOpen, FaCube, FaCheckCircle, FaTimesCircle } from 'react-icons/fa'
 import StatCard from '../../components/StatCard'
 import { dashboardAPI, blockchainAPI } from '../../utils/api'
 
@@ -63,7 +63,7 @@ const Overview = () => {
         <StatCard
           title="Blockchain Status"
           value={stats?.blockchain_valid ? 'Valid' : 'Invalid'}
-          icon={FaCheckCircle}
+          icon={stats?.blockchain_valid ? FaCheckCircle : FaTimesCircle}
           color={stats?.blockchain_valid ? 'green' : 'red'}
         />
       </div>

@@ -1,11 +1,14 @@
 import React, { useState } from 'react'
-import { motion } from 'framer-motion'
+import { motion, AnimatePresence } from 'framer-motion'
 import { FaSignInAlt, FaSignOutAlt } from 'react-icons/fa'
 import { evidenceLogAPI } from '../../utils/api'
 import { useAuth } from '../../context/AuthContext'
+import Toast from '../../components/Toast'
+import { useToast } from '../../hooks/useToast'
 
 const EntryExitLog = () => {
   const { user } = useAuth()
+  const { toasts, showToast, removeToast } = useToast()
   const [loading, setLoading] = useState(false)
   const [formData, setFormData] = useState({
     evidence_id: '',
@@ -21,7 +24,7 @@ const EntryExitLog = () => {
 
     try {
       await evidenceLogAPI.create(formData)
-      alert('Entry/Exit log recorded successfully and added to blockchain')
+      showToast('Entry/Exit log recorded successfully and added to blockchain', 'success')
       
       // Reset form
       setFormData({
@@ -32,7 +35,7 @@ const EntryExitLog = () => {
         description: ''
       })
     } catch (error) {
-      alert(error.response?.data?.detail || 'Failed to create log')
+      showToast(error.response?.data?.detail || 'Failed to create log', 'error')
     } finally {
       setLoading(false)
     }
@@ -48,6 +51,18 @@ const EntryExitLog = () => {
 
   return (
     <div>
+      {/* Toast Notifications */}
+      <AnimatePresence>
+        {toasts.map(toast => (
+          <Toast
+            key={toast.id}
+            message={toast.message}
+            type={toast.type}
+            onClose={() => removeToast(toast.id)}
+          />
+        ))}
+      </AnimatePresence>
+      
       <h2 className="text-2xl font-bold text-gray-800 mb-6">Entry/Exit Log Management</h2>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
